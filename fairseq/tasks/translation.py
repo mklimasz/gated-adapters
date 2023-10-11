@@ -58,6 +58,7 @@ def load_langpair_dataset(
     shuffle=True,
     pad_to_multiple=1,
     prepend_bos_src=None,
+    load_domains=False,
 ):
     def split_exists(split, src, tgt, lang, data_path):
         filename = os.path.join(data_path, "{}.{}-{}.{}".format(split, src, tgt, lang))
@@ -152,6 +153,16 @@ def load_langpair_dataset(
                 align_path, None, dataset_impl
             )
 
+    domain_dataset = None
+    if load_domains:
+        domain_path = os.path.join(data_path, "{}.domain.{}-{}".format(split, src, tgt))
+        if indexed_dataset.dataset_exists(domain_path, impl="domain"):
+            domain_dataset = data_utils.load_indexed_dataset(
+                domain_path, None, "domain",
+            )
+        else:
+            raise EnvironmentError("file {} not found".format(domain_path))
+
     tgt_dataset_sizes = tgt_dataset.sizes if tgt_dataset is not None else None
     return LanguagePairDataset(
         src_dataset,
@@ -167,6 +178,7 @@ def load_langpair_dataset(
         num_buckets=num_buckets,
         shuffle=shuffle,
         pad_to_multiple=pad_to_multiple,
+        domain_dataset=domain_dataset,
     )
 
 
@@ -196,6 +208,9 @@ class TranslationConfig(FairseqDataclass):
     )
     load_alignments: bool = field(
         default=False, metadata={"help": "load the binarized alignments"}
+    )
+    load_domains: bool = field(
+        default=False, metadata={"help": "load the domains of the sentences"}
     )
     left_pad_source: bool = field(
         default=True, metadata={"help": "pad the source on the left"}
@@ -354,6 +369,7 @@ class TranslationTask(FairseqTask):
             num_buckets=self.cfg.num_batch_buckets,
             shuffle=(split != "test"),
             pad_to_multiple=self.cfg.required_seq_len_multiple,
+            load_domains=self.cfg.load_domains,
         )
 
     def build_dataset_for_inference(self, src_tokens, src_lengths, constraints=None):

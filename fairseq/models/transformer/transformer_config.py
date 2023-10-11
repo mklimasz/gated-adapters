@@ -95,6 +95,33 @@ class QuantNoiseConfig(FairseqDataclass):
 
 @dataclass
 class TransformerConfig(FairseqDataclass):
+    # Domain adaptation params
+    domain_adaptation: bool = field(
+        default=False,
+        metadata={
+            "help": "use domain adaptation options",
+            "argparse_alias": "--da",
+        },
+    )
+    # All the options below are ignored without domain_adaptation flag.
+    da_add_domain_embedding: int = field(
+        default=0,
+        metadata={"help": "defines number of domains and adds corresponding learnable embedding to an input, "
+                          "non-zero value enables this option must be used together with --da and --load-domains"},
+    )
+
+    # Adapter params
+    bottleneck: float = field(
+        default=2.0, metadata={"help": "adapter bottleneck dim"}
+    )
+
+    # Gating params
+    shared_gating: bool = field(
+        default=False, metadata={"help": "share gating across all encoder and decoder layers"}
+    )
+
+
+    # Regular transformer params
     activation_fn: ChoiceEnum(utils.get_available_activation_fns()) = field(
         default="relu",
         metadata={"help": "activation function to use"},

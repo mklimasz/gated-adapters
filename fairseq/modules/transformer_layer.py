@@ -116,26 +116,6 @@ class TransformerEncoderLayerBase(nn.Module):
         # torch version check
         # make sure BT version is >=1.12.0
         self.BT_version = False
-        if "fb" in torch.__version__:
-            self.BT_version = True
-        else:
-            if "+" in torch.__version__:
-                self.torch_version = torch.__version__.split("+")[0]
-            else:
-                self.torch_version = torch.__version__
-
-            self.torch_version = self.torch_version.split(".")
-            self.int_version = (
-                int(self.torch_version[0]) * 1000
-                + int(self.torch_version[1]) * 10
-                + int(self.torch_version[2])
-            )
-            if len(self.torch_version) == 3:
-                if self.int_version >= 1120:
-                    self.BT_version = True
-            elif len(self.torch_version) == 4:
-                if self.int_version >= 1130:
-                    self.BT_version = True
 
     def _load_from_state_dict(
         self,
@@ -280,6 +260,7 @@ class TransformerEncoderLayerBase(nn.Module):
         x,
         encoder_padding_mask: Optional[Tensor],
         attn_mask: Optional[Tensor] = None,
+        domains: Optional[Tensor] = None,
     ):
         """
         Args:
@@ -547,6 +528,7 @@ class TransformerDecoderLayerBase(nn.Module):
         self_attn_padding_mask: Optional[torch.Tensor] = None,
         need_attn: bool = False,
         need_head_weights: bool = False,
+        domains: Optional[torch.Tensor] = None,
     ):
         """
         Args:

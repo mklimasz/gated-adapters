@@ -3,6 +3,8 @@
 # This source code is licensed under the MIT license found in the
 # LICENSE file in the root directory of this source tree.
 
+import logging
+import os
 import shutil
 import struct
 from functools import lru_cache
@@ -17,6 +19,10 @@ from fairseq.data.huffman import HuffmanMMapIndexedDataset, HuffmanMMapIndex
 from . import FairseqDataset
 
 from typing import Union
+
+from .plasma_utils import PlasmaArray
+
+logger = logging.getLogger(__name__)
 
 
 def best_fitting_int_dtype(
@@ -90,6 +96,10 @@ def make_dataset(path, impl, fix_lua_indexing=False, dictionary=None):
         return EncodedFastaDataset(path, dictionary)
     elif impl == "huffman" and HuffmanMMapIndexedDataset.exists(path):
         return HuffmanMMapIndexedDataset(path)
+    elif impl == "domain" and DomainDataset.exists(path):
+        logger.warning("Creating dataset with domain annotations. "
+                       "If `load_domains` is not enabled, this should not happen.")
+        return DomainDataset(path)
     return None
 
 
@@ -100,6 +110,8 @@ def dataset_exists(path, impl):
         return MMapIndexedDataset.exists(path)
     elif impl == "huffman":
         return HuffmanMMapIndexedDataset.exists(path)
+    elif impl == "domain":
+        return DomainDataset.exists(path)
     else:
         return IndexedDataset.exists(path)
 
@@ -141,6 +153,54 @@ def index_file_path(prefix_path):
 
 def data_file_path(prefix_path):
     return prefix_path + ".bin"
+
+
+class DomainDataset(FairseqDataset):
+
+    def __init__(self, path):
+        assert os.path.exists(path), f"Path [{path}] with domain annotations does not exists."
+        self.path = path
+        self.domain = []
+        self._read_data(path)
+        self.length = len(self.domain)
+        self.domain = PlasmaArray(np.array(self.domain))
+        self.domains_count = 0
+
+    def _read_data(self, path):
+        with open(path) as f:
+            for idx, line in enumerate(f.readlines()):
+                values = line.strip("\n").split()
+
+                # Check domains count consistency.
+                if idx == 0:
+                    self.domains_count = len(values)
+                assert self.domains_count == len(values), (
+                    f"Inconsistent number of domains (was {self.domains_count} but {len(values)} at line {idx})"
+                )
+
+                # Index of a domain per sentence
+                assert len(values), f"Empty line in domain annotations file."
+                if len(values) == 1:
+                    self.domain.append(int(line))
+                else:
+                    domains = [float(d) for d in values]
+                    self.domain.append(domains)
+
+    def check_index(self, i):
+        if i < 0 or i >= len(self):
+            raise IndexError("index out of range")
+
+    @lru_cache(maxsize=8)
+    def __getitem__(self, index):
+        self.check_index(index)
+        return torch.tensor(self.domain.array[index])
+
+    def __len__(self):
+        return self.length
+
+    @staticmethod
+    def exists(path):
+        return PathManager.exists(path)
 
 
 class IndexedDataset(FairseqDataset):

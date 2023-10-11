@@ -145,9 +145,9 @@ class TransformerModel(TransformerModelBase):
         )
 
     @classmethod
-    def build_decoder(cls, args, tgt_dict, embed_tokens):
+    def build_decoder(cls, args, tgt_dict, embed_tokens, gating=None):
         return super().build_decoder(
-            TransformerConfig.from_namespace(args), tgt_dict, embed_tokens
+            TransformerConfig.from_namespace(args), tgt_dict, embed_tokens, gating
         )
 
 

@@ -162,6 +162,15 @@ def collate(
             constraints[i, 0 : lens[i]] = samples[i].get("constraints")
         batch["constraints"] = constraints.index_select(0, sort_order)
 
+    if samples[0].get("domains", None) is not None:
+        domains = [sample.get("domains") for sample in samples]
+
+        assert domains[0].dim() < 3, f"Domain can be represented as scalar or vector but got dim: {domains[0].dim()}"
+        if domains[0].dim() == 0:
+            domains = [d.view(1) for d in domains]
+
+        domains = torch.stack(domains, 0)
+        batch["net_input"]["domains"] = domains.index_select(0, sort_order)
     return batch
 
 
@@ -202,6 +211,8 @@ class LanguagePairDataset(FairseqDataset):
         tgt_lang_id (int, optional): target language ID, if set, the collated batch
             will contain a field 'tgt_lang_id' which indicates the target language
              of the samples.
+         domain_dataset (torch.utils.data.Dataset, optional): dataset containing
+            domain tags.
     """
 
     def __init__(
@@ -226,6 +237,7 @@ class LanguagePairDataset(FairseqDataset):
         src_lang_id=None,
         tgt_lang_id=None,
         pad_to_multiple=1,
+        domain_dataset=None,
     ):
         if tgt_dict is not None:
             assert src_dict.pad() == tgt_dict.pad()
@@ -297,6 +309,7 @@ class LanguagePairDataset(FairseqDataset):
         else:
             self.buckets = None
         self.pad_to_multiple = pad_to_multiple
+        self.domain_dataset = domain_dataset
 
     def get_batch_shapes(self):
         return self.buckets
@@ -336,6 +349,8 @@ class LanguagePairDataset(FairseqDataset):
             example["alignment"] = self.align_dataset[index]
         if self.constraints is not None:
             example["constraints"] = self.constraints[index]
+        if self.domain_dataset is not None:
+            example["domains"] = self.domain_dataset[index]
         return example
 
     def __len__(self):

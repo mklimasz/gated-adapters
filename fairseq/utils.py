@@ -343,11 +343,12 @@ def multi_tensor_total_norm(grads, chunk_size=2048 * 32) -> torch.Tensor:
     return total_norm
 
 
+def grad_exists(p):
+    return p is not None and getattr(p, "grad", None) is not None
+
+
 @torch.no_grad()
 def clip_grad_norm_(params, max_norm, aggregate_norm_fn=None) -> torch.Tensor:
-    def grad_exists(p):
-        return p is not None and getattr(p, "grad", None) is not None
-
     if isinstance(params, torch.Tensor):
         params = [params]
     params = list(params)

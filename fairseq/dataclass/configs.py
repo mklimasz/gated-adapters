@@ -250,6 +250,9 @@ class CommonConfig(FairseqDataclass):
             "help": "path to run plasma_store, defaults to /tmp/plasma. Paths outside /tmp tend to fail."
         },
     )
+    log_max_grad: bool = field(
+        default=False, metadata={"help": "Log max grad of each param."}
+    )
 
 
 @dataclass

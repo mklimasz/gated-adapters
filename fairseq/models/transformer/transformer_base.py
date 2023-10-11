@@ -95,7 +95,7 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         if cfg.offload_activations:
             cfg.checkpoint_activations = True  # offloading implies checkpointing
         encoder = cls.build_encoder(cfg, src_dict, encoder_embed_tokens)
-        decoder = cls.build_decoder(cfg, tgt_dict, decoder_embed_tokens)
+        decoder = cls.build_decoder(cfg, tgt_dict, decoder_embed_tokens, gating=encoder.gating)
         return cls(cfg, encoder, decoder)
 
     @classmethod
@@ -115,12 +115,13 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         return TransformerEncoderBase(cfg, src_dict, embed_tokens)
 
     @classmethod
-    def build_decoder(cls, cfg, tgt_dict, embed_tokens):
+    def build_decoder(cls, cfg, tgt_dict, embed_tokens, gating=None):
         return TransformerDecoderBase(
             cfg,
             tgt_dict,
             embed_tokens,
             no_encoder_attn=cfg.no_cross_attention,
+            gating=gating
         )
 
     # TorchScript doesn't support optional arguments with variable length (**kwargs).
@@ -131,6 +132,7 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         src_lengths,
         prev_output_tokens,
         return_all_hiddens: bool = True,
+        domains: Optional[torch.Tensor] = None,
         features_only: bool = False,
         alignment_layer: Optional[int] = None,
         alignment_heads: Optional[int] = None,
@@ -142,7 +144,7 @@ class TransformerModelBase(FairseqEncoderDecoderModel):
         which are not supported by TorchScript.
         """
         encoder_out = self.encoder(
-            src_tokens, src_lengths=src_lengths, return_all_hiddens=return_all_hiddens
+            src_tokens, src_lengths=src_lengths, return_all_hiddens=return_all_hiddens, domains=domains,
         )
         decoder_out = self.decoder(
             prev_output_tokens,

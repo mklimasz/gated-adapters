@@ -315,6 +315,12 @@ def train(
         ):
             log_output = trainer.train_step(samples)
 
+            if cfg.common.log_max_grad:
+                for name, param in trainer.model.named_parameters():
+                    if utils.grad_exists(param) and not hasattr(param, "expert"):
+                        max_grad = param.grad.detach().max()
+                        metrics.log_scalar(f"gmax/{name}", max_grad)
+
         if log_output is not None:  # not OOM, overflow, ...
             # log mid-epoch stats
             num_updates = trainer.get_num_updates()

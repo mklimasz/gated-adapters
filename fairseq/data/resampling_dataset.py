@@ -93,6 +93,9 @@ class ResamplingDataset(BaseWrapperDataset):
     def size(self, index):
         return self.dataset.size(self._cur_indices.array[index])
 
+    def batch_by_size(self, *args, **kwargs):
+        return self.dataset.batch_by_size(*args, **kwargs)
+
     def ordered_indices(self):
         if self.batch_by_size:
             order = [

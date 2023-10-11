@@ -92,9 +92,17 @@ class TransformerEncoderBase(FairseqEncoder):
             self.layers = LayerDropModuleList(p=self.encoder_layerdrop)
         else:
             self.layers = nn.ModuleList([])
-        self.layers.extend(
-            [self.build_encoder_layer(cfg) for i in range(cfg.encoder.layers)]
-        )
+
+        self.gating = None
+        if hasattr(cfg, "shared_gating") and getattr(cfg, "shared_gating", False):
+            self.gating = nn.Linear(embed_dim, len(cfg.adapter_names))
+            self.layers.extend(
+                [self.build_encoder_layer(cfg, i, gating=self.gating) for i in range(cfg.encoder.layers)]
+            )
+        else:
+            self.layers.extend(
+                [self.build_encoder_layer(cfg, i, gating=None) for i in range(cfg.encoder.layers)]
+            )
         self.num_layers = len(self.layers)
 
         if cfg.encoder.normalize_before:
@@ -102,7 +110,14 @@ class TransformerEncoderBase(FairseqEncoder):
         else:
             self.layer_norm = None
 
-    def build_encoder_layer(self, cfg):
+        if cfg.domain_adaptation and cfg.da_add_domain_embedding:
+            self.domain_embeddings = Embedding(num_embeddings=cfg.da_add_domain_embedding,
+                                               embedding_dim=embed_dim)
+        else:
+            self.domain_embeddings = None
+
+    def build_encoder_layer(self, cfg, i, gating=None):
+        # Gating only used in adapter encoder layer.
         layer = transformer_layer.TransformerEncoderLayerBase(
             cfg, return_fc=self.return_fc
         )
@@ -117,7 +132,7 @@ class TransformerEncoderBase(FairseqEncoder):
         return layer
 
     def forward_embedding(
-        self, src_tokens, token_embedding: Optional[torch.Tensor] = None
+        self, src_tokens, token_embedding: Optional[torch.Tensor] = None, domains: Optional[torch.Tensor] = None
     ):
         # embed tokens and positions
         if token_embedding is None:
@@ -125,6 +140,18 @@ class TransformerEncoderBase(FairseqEncoder):
         x = embed = self.embed_scale * token_embedding
         if self.embed_positions is not None:
             x = embed + self.embed_positions(src_tokens)
+        if self.domain_embeddings is not None:
+            assert domains is not None, "Expected domains, but model got none."
+            # Domains tensor contains a specific domain index.
+            if domains.size(-1) == 1:
+                x = embed + self.embed_scale * self.domain_embeddings(domains)
+            # Domains tensors contains specific weight per domain.
+            elif domains.size(-1) == self.domain_embeddings.num_embeddings:
+                assert torch.all(domains.sum(-1) == 1), f"Weights for {self.__class__.__name__} should be equal to one."
+                weighted_domain = domains @ self.domain_embeddings.weight
+                x = embed + (self.embed_scale * weighted_domain).unsqueeze(1)
+            else:
+                raise ValueError(f"Domains tensor of shape {domains.size()} cannot be handled.")
         if self.layernorm_embedding is not None:
             x = self.layernorm_embedding(x)
         x = self.dropout_module(x)
@@ -138,6 +165,7 @@ class TransformerEncoderBase(FairseqEncoder):
         src_lengths: Optional[torch.Tensor] = None,
         return_all_hiddens: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
+        domains: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -149,6 +177,7 @@ class TransformerEncoderBase(FairseqEncoder):
                 intermediate hidden states (default: False).
             token_embeddings (torch.Tensor, optional): precomputed embeddings
                 default `None` will recompute embeddings
+            domains (torch.Tensor, optional): domain indicators
 
         Returns:
             dict:
@@ -163,7 +192,7 @@ class TransformerEncoderBase(FairseqEncoder):
                   Only populated if *return_all_hiddens* is True.
         """
         return self.forward_scriptable(
-            src_tokens, src_lengths, return_all_hiddens, token_embeddings
+            src_tokens, src_lengths, return_all_hiddens, token_embeddings, domains
         )
 
     # TorchScript doesn't support super() method so that the scriptable Subclass
@@ -176,6 +205,7 @@ class TransformerEncoderBase(FairseqEncoder):
         src_lengths: Optional[torch.Tensor] = None,
         return_all_hiddens: bool = False,
         token_embeddings: Optional[torch.Tensor] = None,
+        domains: Optional[torch.Tensor] = None,
     ):
         """
         Args:
@@ -187,6 +217,7 @@ class TransformerEncoderBase(FairseqEncoder):
                 intermediate hidden states (default: False).
             token_embeddings (torch.Tensor, optional): precomputed embeddings
                 default `None` will recompute embeddings
+            domains (torch.Tensor, optional): domain indicators
 
         Returns:
             dict:
@@ -204,7 +235,7 @@ class TransformerEncoderBase(FairseqEncoder):
         encoder_padding_mask = src_tokens.eq(self.padding_idx)
         has_pads = src_tokens.device.type == "xla" or encoder_padding_mask.any()
 
-        x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings)
+        x, encoder_embedding = self.forward_embedding(src_tokens, token_embeddings, domains)
 
         # account for padding while computing the representation
         if has_pads:
@@ -215,101 +246,30 @@ class TransformerEncoderBase(FairseqEncoder):
 
         encoder_states = []
         fc_results = []
+        gates = []
 
         if return_all_hiddens:
             encoder_states.append(x)
 
-        # nested tensor and BT enable
-        layer = self.layers[0]
-        BT_flag = False
-        NT_flag = False
-        # torch version check, BT>=1.12.0 and NT>=1.13.0.dev20220613
-        # internal format is '1.13.0a0+fb'
-        # external format is '1.13.0.dev20220613'(cpu&gpu) for nightly or "1.11.0"(cpu) or '1.11.0+cu102'(gpu) for stable
-        BT_version = False
-        NT_version = False
-        if "fb" in torch.__version__:
-            BT_version = True
-            NT_version = True
-        else:
-            if "+" in torch.__version__:
-                torch_version = torch.__version__.split("+")[0]
-            else:
-                torch_version = torch.__version__
-
-            torch_version = torch_version.split(".")
-            int_version = (
-                int(torch_version[0]) * 1000
-                + int(torch_version[1]) * 10
-                + int(torch_version[2])
-            )
-            if len(torch_version) == 3:
-                if int_version >= 1120:
-                    BT_version = True
-                if int_version >= 1131:
-                    NT_version = True
-            elif len(torch_version) == 4:
-                if int_version >= 1130:
-                    BT_version = True
-                # Consider _nested_tensor_from_mask_left_aligned is landed after "20220613"
-                if int_version >= 1131 or (
-                    int_version == 1130 and torch_version[3][3:] >= "20220613"
-                ):
-                    NT_version = True
-
-        if (
-            BT_version
-            and x.dim() == 3
-            and layer.load_to_BT
-            and not layer.return_fc
-            and layer.can_use_fastpath
-            and not layer.training
-            and not layer.ever_training
-            and not layer.cfg_checkpoint_activations
-        ):
-            # Batch first can not be justified but needs user to make sure
-            x = x.transpose(0, 1)
-            # Check mask conditions for nested tensor
-            if NT_version:
-                if (
-                    encoder_padding_mask is not None
-                    and torch._nested_tensor_from_mask_left_aligned(
-                        x, encoder_padding_mask.logical_not()
-                    )
-                ):
-                    if not torch.is_grad_enabled() or not x.requires_grad:
-                        x = torch._nested_tensor_from_mask(
-                            x, encoder_padding_mask.logical_not()
-                        )
-                        NT_flag = True
-            BT_flag = True
-
-        # encoder layers
-        if NT_flag:
-            processing_mask = None
-        else:
-            processing_mask = encoder_padding_mask
+        processing_mask = encoder_padding_mask
         encoder_padding_mask_out = processing_mask if has_pads else None
         for layer in self.layers:
-            lr = layer(x, encoder_padding_mask=encoder_padding_mask_out)
+            lr = layer(x, encoder_padding_mask=encoder_padding_mask_out, domains=domains)
 
-            if isinstance(lr, tuple) and len(lr) == 2:
-                x, fc_result = lr
+            if isinstance(lr, tuple) and len(lr) == 3:
+                x, fc_result, extras = lr
             else:
                 x = lr
                 fc_result = None
+                extras = {}
 
             if return_all_hiddens and not torch.jit.is_scripting():
                 assert encoder_states is not None
                 encoder_states.append(x)
                 fc_results.append(fc_result)
 
-        # change back to non-nested and Batch second
-        if NT_flag:
-            x = x.to_padded_tensor(0.0)
-
-        if NT_flag or BT_flag:
-            x = x.transpose(0, 1)
+            if "gates" in extras:
+                gates.append(extras["gates"])
 
         if self.layer_norm is not None:
             x = self.layer_norm(x)
@@ -329,9 +289,11 @@ class TransformerEncoderBase(FairseqEncoder):
             "encoder_padding_mask": [encoder_padding_mask],  # B x T
             "encoder_embedding": [encoder_embedding],  # B x T x C
             "encoder_states": encoder_states,  # List[T x B x C]
+            "gates": gates,
             "fc_results": fc_results,  # List[T x B x C]
             "src_tokens": [],
             "src_lengths": [src_lengths],
+            "domains": domains
         }
 
     @torch.jit.export
@@ -373,10 +335,19 @@ class TransformerEncoderBase(FairseqEncoder):
         else:
             src_lengths = [(encoder_out["src_lengths"][0]).index_select(0, new_order)]
 
+        domains = None
+        if encoder_out["domains"] is not None:
+            domains = (encoder_out["domains"]).index_select(0, new_order)
+
         encoder_states = encoder_out["encoder_states"]
         if len(encoder_states) > 0:
             for idx, state in enumerate(encoder_states):
                 encoder_states[idx] = state.index_select(1, new_order)
+
+        gates = encoder_out["gates"]
+        if len(gates) > 0:
+            for idx, gate in enumerate(gates):
+                gates[idx] = gate.index_select(0, new_order)
 
         return {
             "encoder_out": new_encoder_out,  # T x B x C
@@ -385,6 +356,8 @@ class TransformerEncoderBase(FairseqEncoder):
             "encoder_states": encoder_states,  # List[T x B x C]
             "src_tokens": src_tokens,  # B x T
             "src_lengths": src_lengths,  # B x 1
+            "gates": gates,  # List[torch.Tensor], Empty or List of B x adapters_count with len(self.layers)
+            "domains": domains,  # Optional[tensor.Torch], B x 1 or B x domain_count
         }
 
     @torch.jit.export
@@ -433,7 +406,15 @@ class TransformerEncoder(TransformerEncoderBase):
             return_fc=return_fc,
         )
 
-    def build_encoder_layer(self, args):
+    def build_encoder_layer(self, args, i, gating=None):
         return super().build_encoder_layer(
             TransformerConfig.from_namespace(args),
+            i,
+            gating
         )
+
+
+def Embedding(num_embeddings, embedding_dim):
+    m = nn.Embedding(num_embeddings, embedding_dim)
+    nn.init.normal_(m.weight, mean=0, std=embedding_dim**-0.5)
+    return m

@@ -565,9 +565,12 @@ class Trainer(object):
                         layer._prune_fc_layer(remove_index=remove_index)
                     logger.info(self.model)
 
-                self.model.load_state_dict(
-                    state["model"], strict=True, model_cfg=self.cfg.model
+                # Disabling strict loading mode during adapters fine-tuning.
+                strict = not any("adapter" in param_name[0] for param_name in self.model.named_parameters())
+                missing_keys = self.model.load_state_dict(
+                    state["model"], strict=strict, model_cfg=self.cfg.model
                 )
+                logger.info(f"Missing keys: {str(missing_keys)}")
                 # save memory for later steps
                 del state["model"]
                 if utils.has_parameters(self.get_criterion()):

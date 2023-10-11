@@ -56,6 +56,7 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
         embed_tokens,
         no_encoder_attn=False,
         output_projection=None,
+        gating=None,
     ):
         self.cfg = cfg
         super().__init__(dictionary)
@@ -115,12 +116,23 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
             self.layers = LayerDropModuleList(p=self.decoder_layerdrop)
         else:
             self.layers = nn.ModuleList([])
-        self.layers.extend(
-            [
-                self.build_decoder_layer(cfg, no_encoder_attn)
-                for _ in range(cfg.decoder.layers)
-            ]
-        )
+
+        if hasattr(cfg, "shared_gating") and getattr(cfg, "shared_gating", False):
+            assert gating is not None
+            self.layers.extend(
+                [
+                    self.build_decoder_layer(cfg, no_encoder_attn, gating=gating)
+                    for _ in range(cfg.decoder.layers)
+                ]
+            )
+        else:
+            assert gating is None
+            self.layers.extend(
+                [
+                    self.build_decoder_layer(cfg, no_encoder_attn)
+                    for _ in range(cfg.decoder.layers)
+                ]
+            )
         self.num_layers = len(self.layers)
 
         if cfg.decoder.normalize_before and not cfg.no_decoder_final_norm:
@@ -171,7 +183,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
                 BaseLayer(cfg),
             )
 
-    def build_decoder_layer(self, cfg, no_encoder_attn=False):
+    def build_decoder_layer(self, cfg, no_encoder_attn=False, gating=None):
+        # Gating only used in adapter decoder layers.
         layer = transformer_layer.TransformerDecoderLayerBase(cfg, no_encoder_attn)
         checkpoint = cfg.checkpoint_activations
         if checkpoint:
@@ -213,7 +226,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
                 - the decoder's output of shape `(batch, tgt_len, vocab)`
                 - a dictionary with any model-specific outputs
         """
-
+        if hasattr(self.cfg, "adapter_type") and getattr(self.cfg, "adapter_type", "") == "gated":
+            incremental_state = None
         x, extra = self.extract_features(
             prev_output_tokens,
             encoder_out=encoder_out,
@@ -331,13 +345,14 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
         # decoder layers
         attn: Optional[Tensor] = None
         inner_states: List[Optional[Tensor]] = [x]
+        extras = {"gates": encoder_out["gates"]}
         for idx, layer in enumerate(self.layers):
             if incremental_state is None and not full_context_alignment:
                 self_attn_mask = self.buffered_future_mask(x)
             else:
                 self_attn_mask = None
 
-            x, layer_attn, _ = layer(
+            o = layer(
                 x,
                 enc,
                 padding_mask,
@@ -346,7 +361,16 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
                 self_attn_padding_mask=self_attn_padding_mask,
                 need_attn=bool((idx == alignment_layer)),
                 need_head_weights=bool((idx == alignment_layer)),
+                domains=encoder_out["domains"],
             )
+            if len(o) == 3:
+                x, layer_attn, _ = o
+            else:
+                assert len(o) == 4
+                x, layer_attn, _, e = o
+                for k, v in e.items():
+                    extras[k].append(v)
+
             inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:
                 attn = layer_attn.float().to(x)
@@ -367,7 +391,8 @@ class TransformerDecoderBase(FairseqIncrementalDecoder):
         if self.project_out_dim is not None:
             x = self.project_out_dim(x)
 
-        return x, {"attn": [attn], "inner_states": inner_states}
+        extras.update({"attn": [attn], "inner_states": inner_states})
+        return x, extras
 
     def output_layer(self, features):
         """Project features to the vocabulary size."""
@@ -461,6 +486,7 @@ class TransformerDecoder(TransformerDecoderBase):
         embed_tokens,
         no_encoder_attn=False,
         output_projection=None,
+        gating=None
     ):
         self.args = args
         super().__init__(
@@ -469,6 +495,7 @@ class TransformerDecoder(TransformerDecoderBase):
             embed_tokens,
             no_encoder_attn=no_encoder_attn,
             output_projection=output_projection,
+            gating=gating
         )
 
     def build_output_projection(self, args, dictionary, embed_tokens):
@@ -476,7 +503,7 @@ class TransformerDecoder(TransformerDecoderBase):
             TransformerConfig.from_namespace(args), dictionary, embed_tokens
         )
 
-    def build_decoder_layer(self, args, no_encoder_attn=False):
+    def build_decoder_layer(self, args, no_encoder_attn=False, gating=None):
         return super().build_decoder_layer(
-            TransformerConfig.from_namespace(args), no_encoder_attn=no_encoder_attn
+            TransformerConfig.from_namespace(args), no_encoder_attn=no_encoder_attn, gating=gating
         )
