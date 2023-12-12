@@ -1,6 +1,6 @@
 # Gated Adapters for Multi-Domain Neural Machine Translation
 
-This project provides modified fairseq codebase required to train the model introduced in the paper ["Gated Adapters for Multi-Domain Neural Machine Translation"](https://ebooks.iospress.nl/doi/10.3233/FAIA230404).
+This project provides modified fairseq codebase required to train the model introduced in the paper ["Gated Adapters for Multi-Domain Neural Machine Translation"](media/publication.pdf) at [ECAI 2023](https://ebooks.iospress.nl/doi/10.3233/FAIA230404).
 
 ## Citation
 ```
